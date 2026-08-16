@@ -35,8 +35,15 @@ unset VITE_DEV_BRANCH
 # working tree these are identical; in any worktree (whether under .worktrees/,
 # .claude/worktrees/, or elsewhere on disk) they differ.
 if git rev-parse --is-inside-work-tree &>/dev/null; then
-    GIT_DIR=$(git rev-parse --git-dir)
-    GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+    # Resolve both to physical absolute paths before comparing. git reports
+    # these in whichever form is shortest relative to the CURRENT directory, so
+    # from a subdirectory (`just dev` sources this from desktop/) the main
+    # checkout yields an absolute --git-dir and a relative --git-common-dir for
+    # the very same directory. Comparing the raw strings then misreports every
+    # plain checkout as a worktree, which silently gives the app a per-branch
+    # identifier and a separate application-support directory.
+    GIT_DIR=$(cd "$(git rev-parse --git-dir)" 2>/dev/null && pwd -P)
+    GIT_COMMON_DIR=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
     if [[ -n "$GIT_COMMON_DIR" && "$GIT_DIR" != "$GIT_COMMON_DIR" ]]; then
         BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
         export BUZZ_WORKTREE_LABEL="${BRANCH_NAME##*/}"
