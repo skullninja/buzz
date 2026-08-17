@@ -3957,6 +3957,22 @@ fn spawn_failure_notice(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Whether a completed turn looks like a silent delivery failure.
+///
+/// Only *undelivered speech* is a defect. A turn that said nothing is
+/// frequently correct — Buzz's own base prompt tells agents that silence is
+/// usually the right answer — so it must never be flagged.
+fn is_silent_delivery(text: Option<&crate::acp::TurnText>, published: u64) -> bool {
+    text.is_some() && published == 0
+}
+
+/// How long to wait before asking the relay whether the agent's reply landed.
+///
+/// The agent publishes its own message through the CLI, so the write races
+/// this check. Long enough for it to land, short enough that the warning still
+/// refers to the turn the operator just watched.
+const UNPUBLISHED_CHECK_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn handle_prompt_result(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
@@ -4181,6 +4197,78 @@ fn handle_prompt_result(
                 outcome = outcome_label,
                 "agent_returned"
             );
+
+            // Did anything the agent said actually reach the channel?
+            //
+            // buzz-acp does not publish replies — the agent sends its own via
+            // the CLI — so a turn can finish cleanly having delivered nothing,
+            // with no error anywhere. Ask the relay.
+            //
+            // This function is synchronous, so the check is spawned. That is
+            // also better behaviour: the agent's publish races this, and a
+            // spawned check gives that write time to land.
+            let turn_text = result.agent.acp.take_turn_text();
+            if let (Some(text), Some(observer_handle), Some(rest), PromptSource::Channel(channel)) = (
+                turn_text,
+                observer.clone(),
+                rest_client.cloned(),
+                &result.source,
+            ) {
+                let channel = *channel;
+                let author = config.keys.public_key();
+                let turn = turn_id.clone();
+
+                tokio::spawn(async move {
+                    tokio::time::sleep(UNPUBLISHED_CHECK_GRACE).await;
+
+                    // Both message kinds: an agent publishing v2 must not look
+                    // silent.
+                    let filter = nostr::Filter::new()
+                        .author(author)
+                        .kinds([
+                            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+                            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+                        ])
+                        .since(nostr::Timestamp::from(text.started_at_unix))
+                        .custom_tags(
+                            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+                            [channel.to_string()],
+                        );
+
+                    let published = match rest.count(&[filter]).await {
+                        Ok(value) => value.get("count").and_then(|c| c.as_u64()).unwrap_or(1),
+                        // A failed count assumes published. A false alarm is
+                        // worse than a missed one: it teaches the operator to
+                        // ignore the warning, and then it is worth nothing.
+                        Err(error) => {
+                            tracing::debug!("undelivered-turn check could not count: {error}");
+                            1
+                        }
+                    };
+
+                    if is_silent_delivery(Some(&text), published) {
+                        tracing::warn!(
+                            agent = agent_index,
+                            chars = text.total_chars,
+                            "turn produced text but published no message"
+                        );
+                        observer_handle.emit(
+                            "turn_error",
+                            Some(agent_index),
+                            &observer::context_for(Some(channel), None, Some(turn)),
+                            serde_json::json!({
+                                "outcome": "unpublished",
+                                "error": format!(
+                                    "The turn produced {} characters and published no message to \
+                                     this channel. Nothing was sent. The text began: {}",
+                                    text.total_chars, text.head
+                                ),
+                            }),
+                        );
+                    }
+                });
+            }
+
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.
@@ -7320,6 +7408,32 @@ mod error_outcome_emission_tests {
     //!   red.
 
     use super::*;
+    use crate::acp::TurnText;
+
+    fn some_text() -> TurnText {
+        TurnText {
+            head: "hello".into(),
+            total_chars: 5,
+            started_at_unix: 0,
+        }
+    }
+
+    #[test]
+    fn text_with_no_published_message_is_a_silent_failure() {
+        assert!(is_silent_delivery(Some(&some_text()), 0));
+    }
+
+    #[test]
+    fn text_that_was_published_is_not_a_failure() {
+        assert!(!is_silent_delivery(Some(&some_text()), 1));
+    }
+
+    #[test]
+    fn a_turn_that_said_nothing_is_not_a_failure() {
+        // Silence is frequently correct; only undelivered speech is a defect.
+        assert!(!is_silent_delivery(None, 0));
+    }
+
     use crate::acp::{AcpClient, AcpError};
     use crate::observer::ObserverHandle;
     use crate::pool::{
