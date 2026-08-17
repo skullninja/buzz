@@ -46,6 +46,17 @@ fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
     root.or(reply)
 }
 
+/// A resolved reply target: the thread pointers plus who wrote the parent.
+///
+/// The author is kept here rather than on `buzz_sdk::ThreadRef` — notifying
+/// the person you reply to is a CLI concern, and widening a shared SDK type
+/// for it would push the change onto every other consumer.
+struct ResolvedParent {
+    thread: ThreadRef,
+    /// `None` when the parent could not be resolved; a reply still sends.
+    author: Option<String>,
+}
+
 /// Build a `ThreadRef` for a reply, given the immediate parent's event ID.
 ///
 /// Fetches the parent event from the relay and inspects its NIP-10 `e` tags to
@@ -54,10 +65,22 @@ fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
 /// - Nested reply: `root` is the parent's own root marker; `parent` is unchanged.
 ///
 /// Ensures CLI-sent replies thread correctly using the same NIP-10 logic.
+/// Extract the author pubkey from a raw relay event, normalized to lowercase hex.
+///
+/// Returns `None` when the field is absent or is not 64 hex characters, so a
+/// malformed or unavailable parent can never block a reply from being sent.
+fn parent_author_from_event(event: &serde_json::Value) -> Option<String> {
+    let pubkey = event.get("pubkey")?.as_str()?;
+    if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(pubkey.to_ascii_lowercase())
+}
+
 async fn resolve_thread_ref(
     client: &BuzzClient,
     parent_event_id: &str,
-) -> Result<ThreadRef, CliError> {
+) -> Result<ResolvedParent, CliError> {
     let parent_eid = parse_event_id(parent_event_id)?;
     let filter = serde_json::json!({ "ids": [parent_event_id], "limit": 1 });
     let raw = client.query(&filter).await?;
@@ -77,9 +100,14 @@ async fn resolve_thread_ref(
         _ => parent_eid,
     };
 
-    Ok(ThreadRef {
-        root_event_id: root_eid,
-        parent_event_id: parent_eid,
+    let author = parent_author_from_event(event);
+
+    Ok(ResolvedParent {
+        thread: ThreadRef {
+            root_event_id: root_eid,
+            parent_event_id: parent_eid,
+        },
+        author,
     })
 }
 
@@ -641,6 +669,16 @@ pub async fn cmd_send_message(
         None
     };
 
+    // A reply notifies the person being replied to. Skipped when it is us
+    // (never self-notify) or when they are already mentioned.
+    let mut mention_pubkeys = mention_pubkeys;
+    if let Some(author) = thread_ref.as_ref().and_then(|p| p.author.as_ref()) {
+        let self_hex = client.keys().public_key().to_hex();
+        if author != &self_hex && !mention_pubkeys.iter().any(|m| m == author) {
+            mention_pubkeys.push(author.clone());
+        }
+    }
+
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
     let builder = match p.kind {
@@ -649,7 +687,7 @@ pub async fn cmd_send_message(
                 .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
         }
         Some(45003) => {
-            let tr = thread_ref.as_ref().ok_or_else(|| {
+            let tr = thread_ref.as_ref().map(|p| &p.thread).ok_or_else(|| {
                 CliError::Usage("--reply-to is required for forum comments (kind 45003)".into())
             })?;
             buzz_sdk::build_forum_comment(
@@ -664,7 +702,7 @@ pub async fn cmd_send_message(
         None | Some(9) => buzz_sdk::build_message(
             channel_uuid,
             &final_content,
-            thread_ref.as_ref(),
+            thread_ref.as_ref().map(|p| &p.thread),
             &mention_refs,
             p.broadcast,
             &media_tags,
@@ -769,9 +807,13 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
         alt_text: Some(alt),
     };
 
-    let builder =
-        buzz_sdk::build_diff_message(channel_uuid, &diff, &diff_meta, thread_ref.as_ref())
-            .map_err(|e| CliError::Other(format!("build_diff_message failed: {e}")))?;
+    let builder = buzz_sdk::build_diff_message(
+        channel_uuid,
+        &diff,
+        &diff_meta,
+        thread_ref.as_ref().map(|p| &p.thread),
+    )
+    .map_err(|e| CliError::Other(format!("build_diff_message failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
 
@@ -992,10 +1034,38 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parent_author_extracted_from_event() {
+        let event = serde_json::json!({
+            "pubkey": "CDC3925F58BFC28ABBF09CE3FC3399E06C25EC4CE692F1EE914C7590F4DDA910",
+            "tags": []
+        });
+        assert_eq!(
+            parent_author_from_event(&event),
+            Some("cdc3925f58bfc28abbf09ce3fc3399e06c25ec4ce692f1ee914c7590f4dda910".to_string()),
+            "the author is normalized to lowercase hex"
+        );
+    }
+
+    #[test]
+    fn parent_author_none_when_missing_or_malformed() {
+        assert_eq!(parent_author_from_event(&serde_json::json!({})), None);
+        assert_eq!(
+            parent_author_from_event(&serde_json::json!({ "pubkey": "nothex" })),
+            None,
+            "a malformed parent must never block a reply"
+        );
+        assert_eq!(
+            parent_author_from_event(&serde_json::json!({ "pubkey": 42 })),
+            None
+        );
+    }
+
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        missing_members, normalize_explicit_mentions, parent_author_from_event,
+        parse_member_pubkeys, resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,

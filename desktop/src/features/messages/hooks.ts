@@ -31,6 +31,7 @@ import {
 
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { threadReplyRecipients } from "./lib/threadReplyRecipients";
 import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
 import { buildSentFromThreadTag } from "@/features/messages/lib/sentFromThread";
 import {
@@ -505,10 +506,27 @@ export function useSendMessageMutation(
         mentionTags,
         linkPreviewTags,
       } = splitOutgoingTags(mediaTags);
-      const recipientPubkeys = messageMentionPubkeys(
-        effectiveChannel,
+      const cachedMessages =
+        queryClient.getQueryData<RelayEvent[]>(
+          channelMessagesKey(effectiveChannel.id),
+        ) ?? [];
+
+      // Replying to someone notifies them: merge the parent's author into the
+      // recipients so the reply carries a `p` tag for them. Without it a
+      // threaded reply reaches nobody unless the recipient is re-mentioned by
+      // name, and mention-filtered subscribers never see it at all.
+      const parentAuthor = parentEventId
+        ? cachedMessages.find((message) => message.id === parentEventId)?.pubkey
+        : undefined;
+
+      const recipientPubkeys = threadReplyRecipients(
+        messageMentionPubkeys(
+          effectiveChannel,
+          identity.pubkey,
+          mentionPubkeys,
+        ),
+        parentAuthor,
         identity.pubkey,
-        mentionPubkeys,
       );
       if (sentFromThreadRootId && parentEventId) {
         throw new Error(
@@ -534,10 +552,6 @@ export function useSendMessageMutation(
         emojiTags.length > 0 ||
         linkPreviewTags.length > 0
       ) {
-        const cachedMessages =
-          queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(effectiveChannel.id),
-          ) ?? [];
         const result = await sendChannelMessage(
           effectiveChannel.id,
           content,
