@@ -208,10 +208,10 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
-    /// Usage tracker for goose/buzz-agent's cumulative notification format.
     /// What the agent said during the current turn, for reporting a turn
     /// whose text never reached the channel.
     turn_text: crate::undelivered::TurnTextBuffer,
+    /// Usage tracker for goose/buzz-agent's cumulative notification format.
     goose_usage: UsageTracker,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
     standard_usage: StandardUsageTracker,
@@ -886,14 +886,14 @@ impl AcpClient {
         self.steering_supported
     }
 
-    /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
-    /// exclusive cumulative path; standard ACP prompt usage is used only when
-    /// goose emitted nothing for this turn.
     /// Take what the agent said this turn, for delivery reporting.
     pub fn take_turn_text(&mut self) -> Option<crate::undelivered::TurnText> {
         self.turn_text.take()
     }
 
+    /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
+    /// exclusive cumulative path; standard ACP prompt usage is used only when
+    /// goose emitted nothing for this turn.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
