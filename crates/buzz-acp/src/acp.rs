@@ -138,27 +138,6 @@ fn build_initialize_params() -> serde_json::Value {
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
-/// Characters of assistant text kept per turn.
-///
-/// Enough to recognise what was said; small enough that buzz-acp does not
-/// start retaining message content, which it otherwise deliberately does not.
-const TURN_TEXT_HEAD_CHARS: usize = 200;
-
-/// What an agent said during a turn, for reporting a delivery failure.
-///
-/// Held only until the turn ends: it exists so the harness can say *what* went
-/// undelivered, not to buffer conversation.
-#[derive(Debug, Clone)]
-pub struct TurnText {
-    /// The first [`TURN_TEXT_HEAD_CHARS`] characters, never split mid-character.
-    pub head: String,
-    /// Total characters produced, however much of it was kept.
-    pub total_chars: usize,
-    /// When the turn began, as unix seconds — the lower bound for asking the
-    /// relay whether anything the agent said actually landed.
-    pub started_at_unix: u64,
-}
-
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
@@ -230,12 +209,9 @@ pub struct AcpClient {
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
     /// Usage tracker for goose/buzz-agent's cumulative notification format.
-    /// Bounded preview of assistant text produced during the current turn.
-    turn_text_head: String,
-    /// Total characters produced this turn, including any beyond the head.
-    turn_text_chars: usize,
-    /// When the current turn began.
-    turn_started_at: std::time::SystemTime,
+    /// What the agent said during the current turn, for reporting a turn
+    /// whose text never reached the channel.
+    turn_text: crate::undelivered::TurnTextBuffer,
     goose_usage: UsageTracker,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
     standard_usage: StandardUsageTracker,
@@ -587,9 +563,7 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
-            turn_text_head: String::new(),
-            turn_text_chars: 0,
-            turn_started_at: std::time::SystemTime::now(),
+            turn_text: crate::undelivered::TurnTextBuffer::default(),
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
@@ -820,10 +794,7 @@ impl AcpClient {
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
         self.standard_usage.begin_turn(session_id);
-        // A turn must never inherit the previous turn's text.
-        self.turn_text_head.clear();
-        self.turn_text_chars = 0;
-        self.turn_started_at = std::time::SystemTime::now();
+        self.turn_text.begin();
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -918,39 +889,9 @@ impl AcpClient {
     /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
     /// exclusive cumulative path; standard ACP prompt usage is used only when
     /// goose emitted nothing for this turn.
-    /// Record a chunk of assistant text produced during the current turn.
-    pub(crate) fn record_agent_text(&mut self, text: &str) {
-        self.turn_text_chars += text.chars().count();
-
-        let kept = self.turn_text_head.chars().count();
-        let remaining = TURN_TEXT_HEAD_CHARS.saturating_sub(kept);
-        if remaining > 0 {
-            // Take by character, not by byte: a byte slice would split
-            // multi-byte characters and produce invalid output.
-            self.turn_text_head.extend(text.chars().take(remaining));
-        }
-    }
-
-    /// Take what the agent said this turn, clearing it for the next.
-    ///
-    /// `None` when the turn produced no text at all — which is a legitimate
-    /// outcome, not a failure.
-    pub fn take_turn_text(&mut self) -> Option<TurnText> {
-        if self.turn_text_chars == 0 {
-            return None;
-        }
-        let head = std::mem::take(&mut self.turn_text_head);
-        let total_chars = std::mem::replace(&mut self.turn_text_chars, 0);
-        let started_at_unix = self
-            .turn_started_at
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        Some(TurnText {
-            head,
-            total_chars,
-            started_at_unix,
-        })
+    /// Take what the agent said this turn, for delivery reporting.
+    pub fn take_turn_text(&mut self) -> Option<crate::undelivered::TurnText> {
+        self.turn_text.take()
     }
 
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
@@ -1827,7 +1768,7 @@ impl AcpClient {
                     tracing::info!(target: "acp::stream", "{text}");
                     // Kept so the harness can report what a turn produced when
                     // none of it reaches the channel.
-                    self.record_agent_text(text);
+                    self.turn_text.record(text);
                 }
                 false
             }
@@ -2400,52 +2341,6 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 
 #[cfg(test)]
 mod tests {
-
-    #[tokio::test]
-    async fn turn_text_keeps_a_bounded_head_and_a_full_count() {
-        let mut client = spawn_inert_client().await;
-        for _ in 0..50 {
-            client.record_agent_text("0123456789");
-        }
-
-        let text = client.take_turn_text().expect("text was produced");
-        assert_eq!(text.total_chars, 500, "the full length is reported");
-        assert!(
-            text.head.chars().count() <= TURN_TEXT_HEAD_CHARS,
-            "the head is capped so a long turn cannot grow a buffer"
-        );
-    }
-
-    #[tokio::test]
-    async fn turn_text_is_taken_once_and_reset() {
-        let mut client = spawn_inert_client().await;
-        client.record_agent_text("something");
-        assert!(client.take_turn_text().is_some());
-        assert!(
-            client.take_turn_text().is_none(),
-            "a second take must not repeat the previous turn"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_turn_with_no_text_yields_nothing() {
-        let mut client = spawn_inert_client().await;
-        assert!(client.take_turn_text().is_none());
-    }
-
-    #[tokio::test]
-    async fn multibyte_text_is_not_split_mid_character() {
-        let mut client = spawn_inert_client().await;
-        client.record_agent_text(&"é".repeat(TURN_TEXT_HEAD_CHARS * 2));
-
-        let text = client.take_turn_text().expect("text was produced");
-        assert!(text.head.chars().count() <= TURN_TEXT_HEAD_CHARS);
-        assert!(
-            text.head.ends_with('é'),
-            "the head must not end mid-character"
-        );
-    }
-
     use super::*;
 
     #[test]
