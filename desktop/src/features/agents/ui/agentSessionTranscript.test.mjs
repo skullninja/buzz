@@ -2077,3 +2077,31 @@ test("buildTranscript session/new bare systemPrompt field takes precedence over 
     "_meta.systemPrompt.append must not appear when bare field is present",
   );
 });
+
+test("an undelivered reply is titled as a delivery problem, not an agent error", () => {
+  // The agent did the work; the message did not arrive. Titling it "Turn
+  // error" sends the operator looking at the agent.
+  const items = buildTranscript([
+    {
+      seq: 1,
+      timestamp: "2026-08-17T09:00:00.000Z",
+      kind: "turn_error",
+      agentIndex: 0,
+      channelId: "channel-1",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      payload: {
+        outcome: "unpublished",
+        error:
+          "The turn produced 1847 characters and published no message to this channel.",
+      },
+    },
+  ]);
+
+  const item = items.find((i) => i.title === "Reply not delivered");
+  assert.ok(
+    item,
+    `expected a delivery title, got: ${items.map((i) => i.title).join(", ")}`,
+  );
+  assert.match(item.text, /published no message/);
+});

@@ -774,8 +774,15 @@ export function processTranscriptEvent(
     const outcome = asString(payload.outcome) ?? "error";
     const error = asString(payload.error) ?? "Unknown error";
     const displayError = friendlyTurnErrorCopy(error, payload.code);
+    // An undelivered reply is not an agent fault: the agent did the
+    // work and the message did not arrive. Calling it a turn error
+    // points the operator at the wrong thing.
     const title =
-      event.kind === "agent_panic" ? "Agent error (crash)" : "Turn error";
+      event.kind === "agent_panic"
+        ? "Agent error (crash)"
+        : outcome === "unpublished"
+          ? "Reply not delivered"
+          : "Turn error";
     upsertTextItem(
       d,
       `${event.kind}:${ch}:${event.turnId ?? event.seq}`,
