@@ -5,7 +5,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
+    process_belongs_to_us, process_is_running, record_agent_command,
+    resolve_effective_agent_env, save_managed_agents,
     spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
     write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
     ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
@@ -44,6 +45,16 @@ struct StatusInputs<'a> {
     global: &'a super::GlobalAgentConfig,
 }
 
+/// A persisted runtime pid, if it still names a live agent process.
+///
+/// `runtime_pid` is a receipt, not proof: pids are reused, and a stale record
+/// must never make a dead agent read as running. Both checks are the ones the
+/// restore path already applies before deciding not to start an agent.
+fn adopted_runtime_pid(runtime_pid: Option<u32>) -> Option<u32> {
+    let pid = runtime_pid?;
+    (process_is_running(pid) && process_belongs_to_us(pid)).then_some(pid)
+}
+
 fn status_for_with(
     app: &AppHandle,
     record: &super::ManagedAgentRecord,
@@ -64,8 +75,17 @@ fn status_for_with(
         local_setup,
         lifecycle: runtime
             .map(|runtime| runtime.lifecycle.clone())
+            // An agent can be running without this process holding its handle:
+            // after the desktop restarts while its agents keep going, or when
+            // something else started them. "Running" means the process is
+            // alive, not that we happen to own the Child — so fall back to the
+            // persisted receipt, gated by the same liveness and ownership
+            // checks used elsewhere so a recycled pid never reads as an agent.
+            .or_else(|| adopted_runtime_pid(record.runtime_pid).map(|_| ManagedAgentRuntimeLifecycle::Ready))
             .unwrap_or(ManagedAgentRuntimeLifecycle::Stopped),
-        pid: runtime.map(|runtime| runtime.child.id()),
+        pid: runtime
+            .map(|runtime| runtime.child.id())
+            .or_else(|| adopted_runtime_pid(record.runtime_pid)),
         error: runtime.and_then(|runtime| runtime.error.clone()),
         log_path: managed_agent_runtime_log_path(app, key)
             .ok()
@@ -712,5 +732,24 @@ mod tests {
             Some("unexpected"),
         );
         assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
+    }
+
+    #[test]
+    fn adopted_runtime_pid_rejects_a_live_process_that_is_not_an_agent() {
+        // The test process itself is alive but is not an agent binary, so the
+        // ownership check must reject it. Without that check a recycled pid
+        // would make an unrelated process read as a running agent.
+        assert_eq!(adopted_runtime_pid(Some(std::process::id())), None);
+    }
+
+    #[test]
+    fn adopted_runtime_pid_ignores_a_record_with_no_receipt() {
+        assert_eq!(adopted_runtime_pid(None), None);
+    }
+
+    #[test]
+    fn adopted_runtime_pid_ignores_a_dead_pid() {
+        // A stale receipt must never make a dead agent read as running.
+        assert_eq!(adopted_runtime_pid(Some(0)), None);
     }
 }
