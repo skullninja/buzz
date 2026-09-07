@@ -12,6 +12,10 @@ pub fn kill_stale_tracked_processes(
         records,
         runtimes,
         |pid| process_has_buzz_marker(pid, instance_id),
+        // A recorded pid is a claim, not a fact: pids are reused, so it must
+        // still be alive AND still be an agent binary before we treat it as
+        // evidence that an agent is running.
+        |pid| process_is_running(pid) && process_belongs_to_us(pid),
         terminate_process,
     )
 }
@@ -23,6 +27,7 @@ pub(crate) fn kill_stale_tracked_processes_with(
     records: &mut [ManagedAgentRecord],
     runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     has_marker: impl Fn(u32) -> bool,
+    is_live_agent: impl Fn(u32) -> bool,
     mut kill: impl FnMut(u32) -> Result<(), String>,
 ) -> bool {
     use crate::managed_agents::BackendKind;
@@ -41,6 +46,12 @@ pub(crate) fn kill_stale_tracked_processes_with(
             // authoritative ownership proof; terminate only if it matches.
             if has_marker(pid) {
                 let _ = kill(pid);
+            } else if is_live_agent(pid) {
+                // Someone else's agent, still running. Not ours to kill, and
+                // not ours to forget: this pid is the only evidence the app has
+                // that the agent is up, so clearing it makes the UI offer Start
+                // for a position that already has a process.
+                continue;
             }
             record.runtime_pid = None;
             record.last_stopped_at = Some(crate::util::now_iso());
@@ -54,7 +65,22 @@ pub(crate) fn kill_stale_tracked_processes_with(
 pub fn sync_managed_agent_processes(
     records: &mut [ManagedAgentRecord],
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
-    _instance_id: &str,
+    instance_id: &str,
+) -> (bool, Vec<String>) {
+    sync_managed_agent_processes_with(
+        records,
+        runtimes,
+        |pid| process_has_buzz_marker(pid, instance_id),
+        |pid| process_is_running(pid) && process_belongs_to_us(pid),
+    )
+}
+
+/// Injectable version of `sync_managed_agent_processes` for testing.
+pub(crate) fn sync_managed_agent_processes_with(
+    records: &mut [ManagedAgentRecord],
+    runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    has_marker: impl Fn(u32) -> bool,
+    is_live_agent: impl Fn(u32) -> bool,
 ) -> (bool, Vec<String>) {
     let mut changed = false;
     let mut exited = Vec::new();
@@ -112,13 +138,21 @@ pub fn sync_managed_agent_processes(
         runtimes.remove(&key);
     }
 
-    // `runtime_pid` is legacy bookkeeping. Pair runtimes and receipts are the
-    // authoritative lifecycle source; migration cleanup is handled separately.
+    // `runtime_pid` is legacy bookkeeping for agents this instance started, and
+    // clearing it here is how that bookkeeping stays tidy. But an agent started
+    // by something else has no pair runtime and no receipt, so this field is
+    // the only evidence it is running — and this result is written straight to
+    // disk, so clearing it destroys the record rather than merely ignoring it.
     for record in records.iter_mut() {
-        if record.runtime_pid.take().is_some() {
-            record.updated_at = now_iso();
-            changed = true;
+        let Some(pid) = record.runtime_pid else {
+            continue;
+        };
+        if !has_marker(pid) && is_live_agent(pid) {
+            continue;
         }
+        record.runtime_pid = None;
+        record.updated_at = now_iso();
+        changed = true;
     }
 
     (changed, exited_pubkeys)

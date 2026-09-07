@@ -1064,6 +1064,7 @@ fn kill_stale_custom_harness_with_marker_is_terminated() {
         &mut records,
         &runtimes,
         |_pid| true, // simulate: marker present (custom harness we own)
+        |_pid| true, // alive and a known agent binary
         |pid| {
             killed.push(pid);
             Ok(())
@@ -1079,11 +1080,13 @@ fn kill_stale_custom_harness_with_marker_is_terminated() {
 }
 
 #[test]
-fn kill_stale_process_without_marker_is_skipped() {
-    // A record PID without the marker (not our process — e.g. custom binary
-    // from another tool) should be skipped for termination but still cleared.
-    let mut record = minimal_record("pubkey-foreign");
-    record.runtime_pid = Some(9002);
+fn kill_stale_live_unmarked_agent_is_left_alone_entirely() {
+    // An agent supervised by something else: alive, a known agent binary, and
+    // carrying no marker for this instance. Neither killed nor forgotten —
+    // clearing the pid discards the only evidence it is running, and the UI
+    // then offers Start for a position that already has a process.
+    let mut record = minimal_record("pubkey-external");
+    record.runtime_pid = Some(9101);
     let mut records = vec![record];
     let runtimes = std::collections::HashMap::new();
 
@@ -1091,25 +1094,52 @@ fn kill_stale_process_without_marker_is_skipped() {
     let changed = super::kill_stale_tracked_processes_with(
         &mut records,
         &runtimes,
-        |_pid| false, // simulate: no marker (not our process)
+        |_pid| false, // no marker: not ours
+        |_pid| true,  // alive, and a known agent binary
         |pid| {
             killed.push(pid);
             Ok(())
         },
     );
 
-    assert!(
-        changed,
-        "stale record without marker should still mark changed"
+    assert!(killed.is_empty(), "an unmarked process must never be killed");
+    assert_eq!(
+        records[0].runtime_pid,
+        Some(9101),
+        "a live external agent's pid must survive"
     );
-    assert!(
-        killed.is_empty(),
-        "process without marker must not be killed"
+    assert!(!changed, "nothing changed, so nothing should be persisted");
+}
+
+#[test]
+fn kill_stale_recycled_pid_is_cleared() {
+    // Alive and unmarked, but NOT an agent binary: the pid was reused by an
+    // unrelated process. Preserving it would draw a stranger's process as a
+    // running agent. This is the case the previous single-predicate version
+    // could not tell apart from a live external agent.
+    let mut record = minimal_record("pubkey-recycled");
+    record.runtime_pid = Some(9102);
+    let mut records = vec![record];
+    let runtimes = std::collections::HashMap::new();
+
+    let mut killed = vec![];
+    let changed = super::kill_stale_tracked_processes_with(
+        &mut records,
+        &runtimes,
+        |_pid| false, // no marker
+        |_pid| false, // and not a live agent binary
+        |pid| {
+            killed.push(pid);
+            Ok(())
+        },
     );
+
+    assert!(killed.is_empty(), "still must not kill what we do not own");
     assert!(
         records[0].runtime_pid.is_none(),
-        "runtime_pid must be cleared regardless"
+        "stale bookkeeping must be cleared"
     );
+    assert!(changed);
 }
 
 #[test]
@@ -1130,6 +1160,7 @@ fn kill_stale_live_pair_is_not_touched() {
     let changed = super::kill_stale_tracked_processes_with(
         &mut records,
         &runtimes,
+        |_pid| true,
         |_pid| true,
         |pid| {
             killed.push(pid);
@@ -1271,4 +1302,64 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         job: None,
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
+}
+
+#[test]
+fn sync_keeps_the_pid_of_a_live_agent_started_elsewhere() {
+    // This wipe runs on every list call and its result is saved to disk, so
+    // clearing here does not merely hide the agent — it destroys the record.
+    let mut record = minimal_record("pubkey-external");
+    record.runtime_pid = Some(9201);
+    let mut records = vec![record];
+    let mut runtimes = std::collections::HashMap::new();
+
+    let (changed, exited) = super::sync_managed_agent_processes_with(
+        &mut records,
+        &mut runtimes,
+        |_pid| false, // no marker: not ours
+        |_pid| true,  // alive, and a known agent binary
+    );
+
+    assert_eq!(records[0].runtime_pid, Some(9201));
+    assert!(!changed, "no change means no needless disk write");
+    assert!(exited.is_empty());
+}
+
+#[test]
+fn sync_clears_a_pid_that_is_ours_but_untracked() {
+    // Marked, so it was ours, but no live runtime holds it — genuinely stale
+    // bookkeeping, which is what this wipe exists to clean up.
+    let mut record = minimal_record("pubkey-ours");
+    record.runtime_pid = Some(9202);
+    let mut records = vec![record];
+    let mut runtimes = std::collections::HashMap::new();
+
+    let (changed, _) = super::sync_managed_agent_processes_with(
+        &mut records,
+        &mut runtimes,
+        |_pid| true, // our marker
+        |_pid| true,
+    );
+
+    assert!(records[0].runtime_pid.is_none());
+    assert!(changed);
+}
+
+#[test]
+fn sync_clears_a_recycled_pid() {
+    // Alive and unmarked, but not an agent binary: the pid was reused.
+    let mut record = minimal_record("pubkey-recycled");
+    record.runtime_pid = Some(9203);
+    let mut records = vec![record];
+    let mut runtimes = std::collections::HashMap::new();
+
+    let (changed, _) = super::sync_managed_agent_processes_with(
+        &mut records,
+        &mut runtimes,
+        |_pid| false,
+        |_pid| false,
+    );
+
+    assert!(records[0].runtime_pid.is_none());
+    assert!(changed);
 }
