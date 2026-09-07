@@ -144,7 +144,7 @@ pub fn build_managed_agent_summary(
     let pair_key = workspace_pair_key(app, record);
     let pair_runtime = pair_key.as_ref().and_then(|key| runtimes.get(key));
 
-    let (status, pid, log_path) = if record.backend != BackendKind::Local {
+    let (status, pid, log_path, externally_supervised) = if record.backend != BackendKind::Local {
         // Two-axis status model for remote agents:
         //
         //   Control-plane (this field): "deployed" = provider has been invoked and
@@ -165,7 +165,7 @@ pub fn build_managed_agent_summary(
         } else {
             "not_deployed".to_string()
         };
-        (status, None, String::new())
+        (status, None, String::new(), false)
     } else {
         let persisted_pid = record.runtime_pid.filter(|pid| process_is_running(*pid));
         if let Some(runtime) = pair_runtime {
@@ -173,14 +173,19 @@ pub fn build_managed_agent_summary(
                 "running".to_string(),
                 Some(runtime.child.id()),
                 runtime.log_path.display().to_string(),
+                false,
             )
         } else if let Some(pid) = persisted_pid {
+            // Running, but this instance holds no handle on the process: it was
+            // started by something else. The UI reports the state and must not
+            // offer to stop what it cannot stop.
             (
                 "running".to_string(),
                 Some(pid),
                 managed_agent_log_path(app, &record.pubkey)?
                     .display()
                     .to_string(),
+                true,
             )
         } else {
             (
@@ -189,6 +194,7 @@ pub fn build_managed_agent_summary(
                 managed_agent_log_path(app, &record.pubkey)?
                     .display()
                     .to_string(),
+                false,
             )
         }
     };
@@ -297,6 +303,7 @@ pub fn build_managed_agent_summary(
         .to_string();
 
     Ok(ManagedAgentSummary {
+        externally_supervised,
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),

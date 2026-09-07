@@ -493,6 +493,9 @@ pub struct ManagedAgentProcess {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
+    /// Running, but this desktop instance did not start it and holds no handle
+    /// on the process — so it must not offer to stop it.
+    pub externally_supervised: bool,
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,
