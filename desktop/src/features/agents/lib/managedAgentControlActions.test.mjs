@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
+  canControlManagedAgent,
 } from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
@@ -164,5 +165,28 @@ test("test_respawn_onStopped_fires_before_start_resolves", async () => {
     events,
     ["stop", "onStopped", "start"],
     "onStopped must fire after stop resolves and before start is called",
+  );
+});
+
+test("controls are offered for an agent this desktop started", () => {
+  assert.equal(
+    canControlManagedAgent(agent({ status: "running", externallySupervised: false })),
+    true,
+  );
+});
+
+test("controls are withheld for a running agent started elsewhere", () => {
+  // Stopping it would have its supervisor start it again, which reads as a
+  // button that does not work.
+  assert.equal(
+    canControlManagedAgent(agent({ status: "running", externallySupervised: true })),
+    false,
+  );
+});
+
+test("a stopped agent can still be started, whoever ran it last", () => {
+  assert.equal(
+    canControlManagedAgent(agent({ status: "stopped", externallySupervised: true })),
+    true,
   );
 });

@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp, Pencil } from "lucide-react";
 
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
+  canControlManagedAgent,
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -428,7 +429,9 @@ export function ProfileSummaryView({
           followMutation={followMutation}
           agentActionDisabled={isAgentActionPending}
           agentActionLabel={
-            isOwner === true && managedAgent
+            // An agent running under another supervisor is reported, not
+            // controlled: this desktop holds no handle on the process.
+            isOwner === true && managedAgent && canControlManagedAgent(managedAgent)
               ? getManagedAgentPrimaryActionLabel(managedAgent)
               : undefined
           }

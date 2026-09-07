@@ -35,6 +35,19 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
+/**
+ * May this desktop offer start/stop controls for the agent?
+ *
+ * An agent running under another supervisor has no process handle here, so
+ * stopping it would only have its supervisor bring it back — a button that
+ * appears not to work. Report the state; decline to act on it.
+ */
+export function canControlManagedAgent(
+  agent: Pick<ManagedAgent, "status" | "externallySupervised">,
+): boolean {
+  return !(agent.externallySupervised && isManagedAgentActive(agent));
+}
+
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";

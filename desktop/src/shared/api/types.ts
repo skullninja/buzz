@@ -307,6 +307,11 @@ export type ManagedAgentBackend =
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
+  /**
+   * Running, but started by something other than this desktop. It holds no
+   * handle on the process, so it reports the state and offers no controls.
+   */
+  externallySupervised: boolean;
   pubkey: string;
   name: string;
   personaId: string | null;

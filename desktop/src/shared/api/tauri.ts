@@ -112,6 +112,8 @@ type RawRelayAgent = {
 };
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
+  // Optional: pre-feature fixtures omit it.
+  externally_supervised?: boolean;
   pubkey: string;
   name: string;
   persona_id: string | null;
@@ -691,6 +693,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
+    externallySupervised: agent.externally_supervised ?? false,
     needsRestart: agent.needs_restart ?? false,
     restartDiff: agent.restart_diff ?? [],
     envVars: agent.env_vars ?? {},

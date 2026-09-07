@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import {
+  canControlManagedAgent,
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -363,6 +364,10 @@ function MemberActionsMenu({
         {memberIsBot && managedAgent ? (
           <>
             {canViewActivity ? <DropdownMenuSeparator /> : null}
+            {/* An agent running under another supervisor is reported, not
+                controlled: stopping it here would only have its supervisor
+                start it again. */}
+            {canControlManagedAgent(managedAgent) ? (
             <DropdownMenuItem
               data-testid={`sidebar-agent-action-${member.pubkey}`}
               disabled={disabled}
@@ -375,6 +380,7 @@ function MemberActionsMenu({
                 ? MANAGED_AGENT_PAIR_ACTION_LABELS[pairAction]
                 : getManagedAgentPrimaryActionLabel(managedAgent)}
             </DropdownMenuItem>
+            ) : null}
             {onEditRespondTo ? (
               <DropdownMenuItem
                 data-testid={`sidebar-edit-respond-to-${member.pubkey}`}
