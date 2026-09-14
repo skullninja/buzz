@@ -32,18 +32,13 @@ unset VITE_DEV_BRANCH
 # identity and icon so multiple local desktop instances can run side by side.
 #
 # Worktree detection: compare --git-dir to --git-common-dir. In the main
-# working tree these are identical; in any worktree (whether under .worktrees/,
-# .claude/worktrees/, or elsewhere on disk) they differ.
+# working tree these identify the same directory; in any linked worktree
+# (whether under .worktrees/, .claude/worktrees/, or elsewhere) they differ.
+# Normalize both paths: callers run from desktop/, where Git can otherwise
+# return an absolute --git-dir but a relative --git-common-dir for the same .git.
 if git rev-parse --is-inside-work-tree &>/dev/null; then
-    # Resolve both to physical absolute paths before comparing. git reports
-    # these in whichever form is shortest relative to the CURRENT directory, so
-    # from a subdirectory (`just dev` sources this from desktop/) the main
-    # checkout yields an absolute --git-dir and a relative --git-common-dir for
-    # the very same directory. Comparing the raw strings then misreports every
-    # plain checkout as a worktree, which silently gives the app a per-branch
-    # identifier and a separate application-support directory.
-    GIT_DIR=$(cd "$(git rev-parse --git-dir)" 2>/dev/null && pwd -P)
-    GIT_COMMON_DIR=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)
+    GIT_DIR=$(git rev-parse --path-format=absolute --git-dir)
+    GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
     if [[ -n "$GIT_COMMON_DIR" && "$GIT_DIR" != "$GIT_COMMON_DIR" ]]; then
         BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
         export BUZZ_WORKTREE_LABEL="${BRANCH_NAME##*/}"

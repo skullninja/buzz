@@ -1,7 +1,10 @@
 import * as React from "react";
 import { ChevronDown, ChevronUp, Pencil } from "lucide-react";
 
+import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { useIsOtherSetupAgent } from "@/features/agents/useKnownAgentPubkeys";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
+import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import {
   canControlManagedAgent,
   getManagedAgentPrimaryActionLabel,
@@ -189,14 +192,8 @@ export function ProfileSummaryView({
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
+  const notManagedOnDevice = useIsOtherSetupAgent(pubkey, profile?.ownerPubkey);
   const activeTurns = useAgentWorking(isBot ? pubkey : null).channels;
-  const avatarStatus = isBot
-    ? managedAgent
-      ? isManagedAgentActive(managedAgent)
-        ? "online"
-        : "offline"
-      : (presenceStatus ?? "offline")
-    : presenceStatus;
   const stickyLayoutRef = React.useRef<HTMLDivElement>(null);
   const [primaryActionsConcealed, setPrimaryActionsConcealed] =
     React.useState(false);
@@ -405,9 +402,10 @@ export function ProfileSummaryView({
       >
         <ProfileHero
           displayName={displayName}
+          notManagedOnDevice={notManagedOnDevice}
           isBot={isBot}
           onEditAgent={canEditAgent ? handleEditAgent : undefined}
-          presenceStatus={avatarStatus}
+          presenceStatus={presenceStatus}
           profile={profile}
           userStatus={userStatus}
         />
@@ -428,6 +426,14 @@ export function ProfileSummaryView({
           concealed={primaryActionsConcealed}
           followMutation={followMutation}
           agentActionDisabled={isAgentActionPending}
+          agentStartBlockReason={
+            managedAgent
+              ? agentPresenceStartBlockReason(
+                  isManagedAgentActive(managedAgent),
+                  presenceStatus,
+                )
+              : undefined
+          }
           agentActionLabel={
             // An agent running under another supervisor is reported, not
             // controlled: this desktop holds no handle on the process.
@@ -601,6 +607,7 @@ export function ProfileSummaryView({
 // ── Hero & metadata ──────────────────────────────────────────────────────────
 
 function ProfileHero({
+  notManagedOnDevice,
   displayName,
   isBot,
   onEditAgent,
@@ -609,6 +616,7 @@ function ProfileHero({
   userStatus,
 }: {
   displayName: string;
+  notManagedOnDevice?: boolean;
   isBot: boolean;
   onEditAgent?: () => void;
   presenceStatus: "online" | "away" | "offline" | undefined;
@@ -647,6 +655,7 @@ function ProfileHero({
         className="h-20 w-20"
         curve={STATUS_DOT_MASK_CURVE}
         cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
+        shape={isBot ? "squircle" : "circle"}
         size={80}
       >
         <ProfileAvatar
@@ -655,6 +664,7 @@ function ProfileHero({
           iconClassName="h-8 w-8"
           label={displayName}
           plain
+          shape={isBot ? "squircle" : "circle"}
           testId="user-profile-avatar"
         />
       </MaskedAvatarBadgeFrame>
@@ -673,6 +683,7 @@ function ProfileHero({
                 {displayName}
               </span>
               {botIndicator}
+              {notManagedOnDevice ? <OtherSetupAgentMarker /> : null}
               <span
                 aria-hidden="true"
                 className="pointer-events-none absolute top-1/2 left-full ml-1 -translate-y-1/2 text-muted-foreground opacity-0 transition-[color,opacity] duration-150 ease-out group-hover:text-foreground group-hover:opacity-100 group-focus-visible:opacity-100"
@@ -689,6 +700,7 @@ function ProfileHero({
           >
             <span className="truncate">{displayName}</span>
             {botIndicator}
+            {notManagedOnDevice ? <OtherSetupAgentMarker /> : null}
           </h3>
         )}
 
@@ -703,7 +715,7 @@ function ProfileHero({
           <p className="text-sm text-muted-foreground">{profile.nip05Handle}</p>
         ) : null}
 
-        {userStatus ? (
+        {userStatus && (userStatus.text || userStatus.emoji) ? (
           <p className="text-sm text-muted-foreground">
             {userStatus.emoji ? (
               <StatusEmoji
