@@ -275,6 +275,8 @@ pub(crate) struct StandardUsageTracker {
     sessions: HashMap<String, StandardSessionState>,
     in_flight_session: Option<String>,
     pending_cost: Option<(String, f64)>,
+    /// The model the adapter says served this turn, for the metric's `model`.
+    pending_model: Option<(String, String)>,
     pending_prompt: Option<(String, PromptResponseUsage, StandardAdapterKind)>,
 }
 
@@ -292,6 +294,7 @@ impl StandardUsageTracker {
     pub(crate) fn begin_turn(&mut self, session_id: &str) {
         self.in_flight_session = Some(session_id.to_string());
         self.pending_cost = None;
+        self.pending_model = None;
         self.pending_prompt = None;
     }
 
@@ -300,6 +303,13 @@ impl StandardUsageTracker {
         if cost.is_finite() && cost >= 0.0 && self.in_flight_session.as_deref() == Some(session_id)
         {
             self.pending_cost = Some((session_id.to_string(), cost));
+        }
+    }
+
+    /// The model claude-agent-acp reports alongside a turn's usage.
+    pub(crate) fn record_model(&mut self, session_id: &str, model: &str) {
+        if !model.is_empty() && self.in_flight_session.as_deref() == Some(session_id) {
+            self.pending_model = Some((session_id.to_string(), model.to_string()));
         }
     }
 
@@ -318,6 +328,7 @@ impl StandardUsageTracker {
         self.in_flight_session = None;
         let prompt = self.pending_prompt.take();
         let cost = self.pending_cost.take();
+        let model = self.pending_model.take();
         let session_id = prompt
             .as_ref()
             .map(|(session_id, _, _)| session_id.clone())
@@ -342,6 +353,10 @@ impl StandardUsageTracker {
             None => (None, None, None, None, None),
         };
 
+        // Only a model reported for this same session describes this turn.
+        let model = model
+            .filter(|(model_session, _)| *model_session == session_id)
+            .map(|(_, model)| model);
         let state = self.sessions.entry(session_id.clone()).or_default();
         let cumulative_cost = cost.map(|(_, cost)| cost);
         let turn_cost = match (state.cost_poisoned, state.last_cost, cumulative_cost) {
@@ -390,7 +405,7 @@ impl StandardUsageTracker {
             cumulative_cost_usd: cumulative_cost,
             cumulative_cache_read_tokens: None,
             cumulative_cache_write_tokens: None,
-            model: None,
+            model,
             pricing_identity: None,
         })
     }

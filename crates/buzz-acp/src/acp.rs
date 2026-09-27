@@ -1905,6 +1905,14 @@ impl AcpClient {
             None => return,
         };
         self.standard_usage.record_cost(session_id, cost);
+        // ACP's usage_update has no model field; claude-agent-acp sends it in
+        // `_meta`. The key contains a slash, which JSON Pointer escapes as ~1.
+        if let Some(model) = msg
+            .pointer("/params/update/_meta/_claude~1model")
+            .and_then(serde_json::Value::as_str)
+        {
+            self.standard_usage.record_model(session_id, model);
+        }
     }
 
     /// Parse a `_goose/unstable/session/update` notification and record the
@@ -4510,6 +4518,36 @@ mod tests {
         assert_eq!(usage.turn_input_tokens, None);
         assert_eq!(usage.turn_cost_usd, Some(0.125));
         assert_eq!(usage.cumulative_cost_usd, Some(0.125));
+    }
+
+    #[tokio::test]
+    async fn claude_usage_carries_the_model_from_meta() {
+        // claude-agent-acp puts the model in `_meta["_claude/model"]` because
+        // ACP's usage_update has no model field. Without reading it, every
+        // Claude turn metric records `model: null`.
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("model-session");
+        client.standard_usage.begin_turn("model-session");
+        let mut update = standard_cost_update("model-session", 0.2);
+        update["params"]["update"]["_meta"] =
+            serde_json::json!({ "_claude/model": "claude-sonnet-5" });
+        client.handle_session_update(&update);
+
+        let usage = client.take_turn_usage().expect("usage with model");
+        assert_eq!(usage.model.as_deref(), Some("claude-sonnet-5"));
+    }
+
+    #[tokio::test]
+    async fn claude_usage_without_meta_model_stays_unknown() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("no-model-session");
+        client.standard_usage.begin_turn("no-model-session");
+        client.handle_session_update(&standard_cost_update("no-model-session", 0.2));
+
+        let usage = client.take_turn_usage().expect("usage without model");
+        assert_eq!(usage.model, None);
     }
 
     #[tokio::test]
